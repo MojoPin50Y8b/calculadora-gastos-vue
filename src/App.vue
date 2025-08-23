@@ -1,7 +1,7 @@
 <script setup>
 import { onMounted, ref, watch, computed } from 'vue'
-import { Chart, ArcElement, Tooltip, Legend } from 'chart.js'
-Chart.register(ArcElement, Tooltip, Legend)
+import { Chart, ArcElement, Tooltip, Legend, DoughnutController } from 'chart.js'
+Chart.register(ArcElement, Tooltip, Legend, DoughnutController)
 
 const LS_KEY = 'calculadora_gastos_v1'
 
