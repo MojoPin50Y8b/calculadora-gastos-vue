@@ -3,9 +3,15 @@ import { onMounted, ref, watch, computed } from 'vue'
 import { Chart, ArcElement, Tooltip, Legend, DoughnutController } from 'chart.js'
 Chart.register(ArcElement, Tooltip, Legend, DoughnutController)
 
+// NUEVO: librerías para Excel y PDF
+import * as XLSX from 'xlsx'
+import jsPDF from 'jspdf'
+//import 'jspdf-autotable'
+import autoTable from 'jspdf-autotable'
+
 const LS_KEY = 'calculadora_gastos_v1'
 
-// Estado
+// ---------------- Estado ----------------
 const ingresoMensual = ref(0)
 const descripcion = ref('')
 const monto = ref('')
@@ -24,7 +30,7 @@ const sobrepaso = computed(() =>
   Math.max(0, totalGastos.value - Number(ingresoMensual.value || 0))
 )
 
-// Persistencia (cargar)
+// ---------------- Persistencia (cargar) ----------------
 onMounted(() => {
   const raw = localStorage.getItem(LS_KEY)
   if (raw) {
@@ -37,7 +43,7 @@ onMounted(() => {
   initChart()
 })
 
-// Persistencia (guardar)
+// ---------------- Persistencia (guardar) ----------------
 watch([ingresoMensual, gastos], () => {
   localStorage.setItem(
     LS_KEY,
@@ -49,7 +55,7 @@ watch([ingresoMensual, gastos], () => {
   updateChart()
 }, { deep: true })
 
-// Utilidades
+// ---------------- Utilidades ----------------
 function agregarGasto() {
   const m = Number(monto.value)
   if (!descripcion.value.trim() || isNaN(m) || m <= 0) return
@@ -75,7 +81,7 @@ function randomColor() {
   return `hsl(${hue} 70% 55%)`
 }
 
-// ---- Chart.js (dona) ----
+// ---------------- Chart.js (dona) ----------------
 let chart
 const canvasRef = ref(null)
 
@@ -153,11 +159,151 @@ function updateChart() {
   chart.data.datasets[0].backgroundColor = colors
   chart.update()
 }
+
+// ---------------- Exportar / Importar ----------------
+
+// Serializa la lista de gastos para Excel
+function getGastosPlanos() {
+  return gastos.value.map(g => ({
+    Descripción: g.desc,
+    Monto: Number(g.monto || 0),
+    Color: g.color || '#cccccc'
+  }))
+}
+
+// Aplica filas importadas a la lista
+function applyRowsToGastos(rows = []) {
+  const sane = rows
+    .filter(r => (r.Descripción || r.descripcion) && !isNaN(Number(r.Monto)))
+    .map((r, i) => ({
+      id: Date.now() + i + Math.random(),
+      desc: String(r.Descripción ?? r.descripcion).trim(),
+      monto: Number(r.Monto),
+      color: String(r.Color || '').trim() || randomColor()
+    }))
+  gastos.value = sane
+}
+
+// Exportar Excel (.xlsx)
+async function exportarExcel() {
+  const wb = XLSX.utils.book_new()
+
+  // Hoja "Gastos"
+  const wsGastos = XLSX.utils.json_to_sheet(getGastosPlanos())
+  XLSX.utils.book_append_sheet(wb, wsGastos, 'Gastos')
+
+  // Hoja "Resumen"
+  const wsResumen = XLSX.utils.aoa_to_sheet([
+    ['IngresoMensual', Number(ingresoMensual.value || 0)],
+    ['TotalGastos', totalGastos.value],
+    ['Restante', restante.value],
+    ['Sobrepaso', sobrepaso.value]
+  ])
+  XLSX.utils.book_append_sheet(wb, wsResumen, 'Resumen')
+
+  XLSX.writeFile(wb, 'reporte_gastos.xlsx')
+}
+
+// Importar Excel
+async function importarExcel(archivo) {
+  if (!archivo) return
+  const buf = await archivo.arrayBuffer()
+  const wb = XLSX.read(buf, { type: 'array' })
+
+  // 1) Resumen (IngresoMensual)
+  const wsResumen = wb.Sheets['Resumen']
+  if (wsResumen) {
+    const aoa = XLSX.utils.sheet_to_json(wsResumen, { header: 1 })
+    const filaIngreso = (aoa || []).find(r => (r?.[0] + '').toLowerCase() === 'ingresomensual')
+    if (filaIngreso && !isNaN(Number(filaIngreso[1]))) {
+      ingresoMensual.value = Number(filaIngreso[1])
+    }
+  }
+
+  // 2) Gastos
+  const wsGastos = wb.Sheets['Gastos'] || wb.Sheets[wb.SheetNames[0]]
+  const rows = XLSX.utils.sheet_to_json(wsGastos ?? {})
+  applyRowsToGastos(rows)
+}
+
+// Exportar PDF (dona + tabla)
+function exportarPDF() {
+  const doc = new jsPDF({ unit: 'pt', format: 'a4' }) // 595 x 842 aprox
+  const marginX = 40
+  let y = 40
+
+  // Título
+  doc.setFont('helvetica', 'bold')
+  doc.setFontSize(18)
+  doc.text('Reporte de Gastos', marginX, y)
+  y += 22
+
+  // Stats
+  doc.setFontSize(12)
+  doc.setFont('helvetica', 'normal')
+  doc.text(`Ingreso mensual: $ ${Number(ingresoMensual.value || 0).toLocaleString()}`, marginX, y); y += 16
+  doc.text(`Total gastos:    $ ${totalGastos.value.toLocaleString()}`, marginX, y); y += 16
+  if (sobrepaso.value === 0) {
+    doc.text(`Restante:        $ ${restante.value.toLocaleString()}`, marginX, y)
+  } else {
+    doc.text(`Sobrepaso:       $ ${sobrepaso.value.toLocaleString()}`, marginX, y)
+  }
+  y += 24
+
+  // Gráfica (canvas -> imagen)
+  const canvas = canvasRef.value
+  if (canvas) {
+    const img = canvas.toDataURL('image/png', 1.0)
+    const imgW = 240
+    const imgH = (canvas.height / canvas.width) * imgW
+    doc.addImage(img, 'PNG', marginX, y, imgW, imgH)
+  }
+
+  // Tabla (a la derecha si cabe, si no debajo)
+  const tableStartY = canvas ? y : y
+  const leftForTable = canvas ? 300 : marginX
+  autoTable(doc,{
+    startY: tableStartY,
+    margin: { left: leftForTable },
+    styles: { fontSize: 10 },
+    head: [['Descripción', 'Monto', 'Color']],
+    body: gastos.value.map(g => [
+      g.desc,
+      `$ ${Number(g.monto).toLocaleString()}`,
+      g.color
+    ])
+  })
+
+  // Footer
+  doc.setFontSize(9)
+  doc.text(`Generado: ${new Date().toLocaleString()}`, marginX, 820)
+
+  doc.save('reporte_gastos.pdf')
+}
+
+// Manejador del input file (se usa en template)
+function onFileChange(e) {
+  const file = e?.target?.files?.[0]
+  importarExcel(file)
+  // limpiar el input para permitir volver a subir el mismo archivo si se desea
+  if (e?.target) e.target.value = ''
+}
 </script>
 
 <template>
   <div class="container">
     <h1>Calculadora de Gastos</h1>
+
+    <!-- NUEVO: Acciones de exportar/importar -->
+    <section class="actions">
+      <button @click="exportarPDF">Descargar PDF</button>
+      <button @click="exportarExcel">Descargar Excel</button>
+
+      <label class="import-btn">
+        Cargar Excel
+        <input type="file" accept=".xlsx,.xls" @change="onFileChange">
+      </label>
+    </section>
 
     <section class="card">
       <label class="row">
@@ -230,6 +376,17 @@ h1 { font-size: 28px; margin-bottom: 12px; }
 .stats .num { font-weight: 700; font-size: 20px; }
 .stats .verde { color: #059669; }
 .stats .rojo { color: #b91c1c; }
+
+/* NUEVO: acciones */
+.actions { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }
+.actions button, .import-btn {
+  background:#111827; color:#fff; border:1px solid #e5e7eb;
+  border-radius:10px; padding:10px 12px; font-weight:600; cursor:pointer;
+}
+.import-btn { position:relative; overflow:hidden; }
+.import-btn input[type="file"]{
+  position:absolute; inset:0; opacity:0; cursor:pointer;
+}
 
 .layout { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
 .form { display: grid; grid-template-columns: 1fr 140px 60px 120px; gap: 8px; }
